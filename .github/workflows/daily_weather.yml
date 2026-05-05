@@ -1,0 +1,25 @@
+name: Daily Field Weather Report
+
+on:
+  schedule:
+    # 12:00 UTC ≈ 07:00 America/Toronto in winter (EST). In summer (EDT) this is 08:00 Toronto — adjust if you want 07:00 year-round.
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  send-weather:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run weather bot
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python weather.py
