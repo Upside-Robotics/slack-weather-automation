@@ -2,7 +2,10 @@
 """Upside Fields weather → Slack (Open-Meteo + incoming webhook or slash command).
 
 Env: SLACK_WEBHOOK_URL (required for `post`). SLACK_SIGNING_SECRET (recommended for `server`).
-Slash command: point Request URL to https://<host>/slack/command (HTTPS in prod, e.g. ngrok).
+Optional: SLACK_SLASH_COMMAND (default /fieldweather).
+
+Slack app: Slash Commands → Create New Command → Command `/fieldweather` → Request URL
+`https://<your-host>/slack/command` → save. Reinstall app to the workspace if prompted.
 """
 
 from __future__ import annotations
@@ -23,8 +26,12 @@ from urllib.parse import parse_qs, urlparse
 
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET", "").strip()
+_SLASH = os.environ.get("SLACK_SLASH_COMMAND", "/fieldweather").strip()
+SLACK_SLASH_COMMAND = _SLASH if _SLASH.startswith("/") else f"/{_SLASH}"
 
 RAIN_ALERT_THRESHOLD = 50
+# Hourly windows for “when rain” (slightly looser than daily alert)
+HOURLY_WET_PROB_MIN = 40
 
 FIELDS = [
     {"name": "Brucelea Poultry", "lat": 44.035611, "lon": -81.608750},
@@ -103,6 +110,144 @@ def _format_report_date(d):
     return f"{d.strftime('%A, %B ')}{d.day}{d.strftime(' %Y')}"
 
 
+def _parse_hour_ts(iso_local: str) -> datetime:
+    """Open-Meteo local times look like 2026-05-05T14:00."""
+    s = iso_local.replace("Z", "+00:00")
+    if len(s) == 16:
+        return datetime.fromisoformat(s)
+    return datetime.fromisoformat(s[:19])
+
+
+def _fmt_clock(d: datetime) -> str:
+    h12 = d.hour % 12
+    if h12 == 0:
+        h12 = 12
+    ap = "AM" if d.hour < 12 else "PM"
+    if d.minute:
+        return f"{h12}:{d.minute:02d} {ap}"
+    return f"{h12} {ap}"
+
+
+def _rain_timing_details(data, today_date: str, daily_precip_mm):
+    """Summarize when rain is likely today from hourly series (America/Toronto)."""
+    h = data.get("hourly") if data else None
+    if not h or "time" not in h:
+        return {
+            "ok": False,
+            "summary": "Hourly timing not available.",
+            "windows": [],
+            "peak_mm": None,
+            "peak_mm_time": None,
+            "peak_prob": None,
+            "peak_prob_time": None,
+        }
+    times = h["time"]
+    n = len(times)
+    prec = h.get("precipitation") or [0] * n
+    prob = h.get("precipitation_probability") or [0] * n
+    hours = []
+    for i, t in enumerate(times):
+        if len(t) < 10 or t[:10] != today_date:
+            continue
+        p = prec[i] if i < len(prec) and prec[i] is not None else 0.0
+        pr = prob[i] if i < len(prob) and prob[i] is not None else 0.0
+        hours.append({"t": t, "p": float(p), "pr": float(pr)})
+    if not hours:
+        return {
+            "ok": False,
+            "summary": "No hourly rows for today.",
+            "windows": [],
+            "peak_mm": None,
+            "peak_mm_time": None,
+            "peak_prob": None,
+            "peak_prob_time": None,
+        }
+
+    wet = [
+        i
+        for i, row in enumerate(hours)
+        if row["p"] >= 0.1 or row["pr"] >= HOURLY_WET_PROB_MIN
+    ]
+    if not wet:
+        dp = daily_precip_mm if daily_precip_mm is not None else 0.0
+        if dp and dp >= 0.2:
+            summary = "Light / scattered in the model (no clear hourly peak)."
+        else:
+            summary = "No meaningful rain in the hourly outlook."
+        peak_mm, peak_mm_time = None, None
+        peak_prob, peak_prob_time = None, None
+        for row in hours:
+            if peak_mm is None or row["p"] > peak_mm:
+                peak_mm, peak_mm_time = row["p"], row["t"]
+            if peak_prob is None or row["pr"] > peak_prob:
+                peak_prob, peak_prob_time = row["pr"], row["t"]
+        return {
+            "ok": True,
+            "summary": summary,
+            "windows": [],
+            "peak_mm": peak_mm,
+            "peak_mm_time": peak_mm_time,
+            "peak_prob": peak_prob,
+            "peak_prob_time": peak_prob_time,
+        }
+
+    runs = []
+    s = wet[0]
+    prev = wet[0]
+    for idx in wet[1:]:
+        if idx == prev + 1:
+            prev = idx
+        else:
+            runs.append((s, prev))
+            s = prev = idx
+    runs.append((s, prev))
+
+    parts = []
+    for a, b in runs:
+        t0 = _parse_hour_ts(hours[a]["t"])
+        t1 = _parse_hour_ts(hours[b]["t"])
+        if a == b:
+            parts.append(_fmt_clock(t0))
+        else:
+            parts.append(f"{_fmt_clock(t0)}–{_fmt_clock(t1)}")
+    peak_mm, peak_mm_time = None, None
+    peak_prob, peak_prob_time = None, None
+    for row in hours:
+        if peak_mm is None or row["p"] > peak_mm:
+            peak_mm, peak_mm_time = row["p"], row["t"]
+        if peak_prob is None or row["pr"] > peak_prob:
+            peak_prob, peak_prob_time = row["pr"], row["t"]
+    return {
+        "ok": True,
+        "summary": ", ".join(parts),
+        "windows": parts,
+        "peak_mm": peak_mm,
+        "peak_mm_time": peak_mm_time,
+        "peak_prob": peak_prob,
+        "peak_prob_time": peak_prob_time,
+    }
+
+
+def _rain_details_text(wx) -> str:
+    timing = wx.get("rain_timing")
+    if not timing or not isinstance(timing, dict):
+        return "When: —"
+    summary = timing.get("summary") or "—"
+    peak_mm = timing.get("peak_mm")
+    peak_mm_time = timing.get("peak_mm_time")
+    peak_prob = timing.get("peak_prob")
+    peak_prob_time = timing.get("peak_prob_time")
+    peak_parts = []
+    if peak_mm is not None and peak_mm_time:
+        peak_parts.append(f"peak mm: {_fmt_clock(_parse_hour_ts(peak_mm_time))} ({float(peak_mm):.1f} mm)")
+    if peak_prob is not None and peak_prob_time:
+        peak_parts.append(
+            f"peak %: {_fmt_clock(_parse_hour_ts(peak_prob_time))} ({int(round(float(peak_prob)))}%)"
+        )
+    peak = f" · {' · '.join(peak_parts)}" if peak_parts else ""
+    return f"When: {summary}{peak}"
+
+
 def fetch_weather(lat, lon):
     url = (
         "https://api.open-meteo.com/v1/forecast"
@@ -110,6 +255,7 @@ def fetch_weather(lat, lon):
         "&daily=temperature_2m_max,temperature_2m_min,"
         "precipitation_sum,precipitation_probability_max,"
         "weathercode,windspeed_10m_max"
+        "&hourly=precipitation,precipitation_probability"
         "&timezone=America%2FToronto"
         "&forecast_days=3"
     )
@@ -126,14 +272,18 @@ def parse_today(data):
         return None
     d = data["daily"]
     try:
+        today = d["time"][0]
+        precip_mm = d["precipitation_sum"][0]
+        rain_timing = _rain_timing_details(data, today, precip_mm)
         return {
-            "date": d["time"][0],
+            "date": today,
             "max_temp": d["temperature_2m_max"][0],
             "min_temp": d["temperature_2m_min"][0],
-            "precip_mm": d["precipitation_sum"][0],
+            "precip_mm": precip_mm,
             "rain_pct": d["precipitation_probability_max"][0],
             "wmo": d["weathercode"][0],
             "wind_kmh": d["windspeed_10m_max"][0],
+            "rain_timing": rain_timing,
             "tmr_rain": d["precipitation_probability_max"][1]
             if len(d["precipitation_probability_max"]) > 1
             else None,
@@ -153,7 +303,12 @@ def collect_results(verbose=True):
         wx = parse_today(data)
         if verbose:
             if wx:
-                print(f"{wx['rain_pct']}% rain, {wx['max_temp']}°C")
+                rt = wx.get("rain_timing")
+                if isinstance(rt, dict):
+                    t = (rt.get("summary") or "")[:60]
+                else:
+                    t = (rt or "")[:60]
+                print(f"{wx['rain_pct']}% · {wx['max_temp']}°C · {t}")
             else:
                 print("failed")
         results.append({"name": field["name"], "wx": wx})
@@ -210,11 +365,15 @@ def build_slack_blocks(results):
             _, tmr_emoji = wmo_label(wx.get("tmr_wmo"))
             tmr_rain = wx.get("tmr_rain")
             tmr_str = f" · Tomorrow: {tmr_emoji} {tmr_rain}%" if tmr_rain is not None else ""
-            precip = wx["precip_mm"] or 0
+            precip = wx["precip_mm"] if wx["precip_mm"] is not None else 0.0
+            precip = float(precip)
+            when = _rain_details_text(wx)
             line = (
                 f"*{emoji} {r['name']}*\n"
-                f"{wx['rain_pct']}% rain · {precip:.1f} mm · "
-                f"{wx['max_temp']}° / {wx['min_temp']}°C · {wx['wind_kmh']} km/h · {desc}{tmr_str}"
+                f"*Forecast:* {desc}\n"
+                f"*High/low:* {wx['max_temp']}°C / {wx['min_temp']}°C · *Wind max:* {wx['wind_kmh']} km/h\n"
+                f"*Rain:* {wx['rain_pct']}% (peak) · *Total:* {precip:.1f} mm\n"
+                f"*{when}*{tmr_str}"
             )
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": line}})
         blocks.append({"type": "divider"})
@@ -229,11 +388,14 @@ def build_slack_blocks(results):
         lines = []
         for r in clear_fields:
             wx = r["wx"]
-            _, emoji = wmo_label(wx["wmo"])
+            desc, emoji = wmo_label(wx["wmo"])
             rain_pct = wx["rain_pct"] if wx["rain_pct"] is not None else 0
+            precip = wx["precip_mm"] if wx["precip_mm"] is not None else 0.0
+            when = _rain_details_text(wx)
             lines.append(
-                f"{emoji} *{r['name']}* — {rain_pct}% · "
-                f"{wx['max_temp']}°/{wx['min_temp']}°C · {wx['wind_kmh']} km/h"
+                f"{emoji} *{r['name']}*\n"
+                f"Forecast: {desc} · Hi/lo: {wx['max_temp']}°/{wx['min_temp']}°C · Wind: {wx['wind_kmh']} km/h\n"
+                f"Rain: {rain_pct}% · Total: {float(precip):.1f} mm · {when}"
             )
         chunk = []
         for line in lines:
@@ -363,6 +525,19 @@ def make_handler():
                 self.end_headers()
                 return
             form = parse_qs(body, keep_blank_values=True)
+            cmd = _form_val(form, "command")
+            if cmd != SLACK_SLASH_COMMAND:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                msg = (
+                    f"This endpoint is for *{SLACK_SLASH_COMMAND}* only "
+                    f"(got `{cmd or '(missing)'}`)."
+                )
+                self.wfile.write(
+                    json.dumps({"response_type": "ephemeral", "text": msg}).encode("utf-8")
+                )
+                return
             response_url = _form_val(form, "response_url")
             if not response_url:
                 self.send_response(400)
@@ -410,8 +585,8 @@ def cmd_server(args):
         print("Warning: SLACK_SIGNING_SECRET not set; requests are not verified.")
     Handler = make_handler()
     httpd = HTTPServer((args.host, args.port), Handler)
-    print(f"Slash command URL: http://{args.host}:{args.port}/slack/command")
-    print("Use HTTPS in Slack (e.g. ngrok http %s)" % args.port)
+    print(f"Slash command: {SLACK_SLASH_COMMAND} → http://{args.host}:{args.port}/slack/command")
+    print("In Slack app, set that path as the command’s Request URL (HTTPS in prod, e.g. ngrok).")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
