@@ -2,8 +2,12 @@ name: Daily Field Weather Report
 
 on:
   schedule:
-    # 12:00 UTC ≈ 07:00 America/Toronto in winter (EST). In summer (EDT) this is 08:00 Toronto — adjust if you want 07:00 year-round.
-    - cron: "0 12 * * *"
+    # GitHub cron is UTC. These are set for America/Toronto when on EDT (UTC-4):
+    # - 07:30 EDT = 11:30 UTC
+    # - 14:30 EDT = 18:30 UTC
+    # When on EST (UTC-5) they will run at 06:30 and 13:30 local.
+    - cron: "30 11 * * *"
+    - cron: "30 18 * * *"
   workflow_dispatch:
 
 permissions:

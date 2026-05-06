@@ -20,7 +20,7 @@ import time
 import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 # --- config ---
 
@@ -32,6 +32,52 @@ SLACK_SLASH_COMMAND = _SLASH if _SLASH.startswith("/") else f"/{_SLASH}"
 RAIN_ALERT_THRESHOLD = 50
 # Hourly windows for “when rain” (slightly looser than daily alert)
 HOURLY_WET_PROB_MIN = 40
+# Wind speed threshold to highlight (km/h)
+WIND_ALERT_KMH = 30
+
+# Nearest place name for lat/lon (Photon reverse geocoder). Cached per run.
+_PLACE_CACHE: dict[tuple[float, float], str] = {}
+
+
+def forecast_reference_place(lat: float, lon: float) -> str:
+    """Human label for where the grid-point forecast applies (town/city + region)."""
+    key = (round(float(lat), 3), round(float(lon), 3))
+    if key in _PLACE_CACHE:
+        return _PLACE_CACHE[key]
+    q = urlencode({"lat": lat, "lon": lon, "lang": "en"})
+    url = f"https://photon.komoot.io/reverse?{q}"
+    req = urllib.request.Request(url, headers={"User-Agent": "UpsideFieldsWeather/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read())
+        feats = data.get("features") or []
+        if not feats:
+            raise ValueError("empty")
+        p = feats[0].get("properties") or {}
+        place = (
+            p.get("city")
+            or p.get("town")
+            or p.get("village")
+            or p.get("district")
+            or p.get("county")
+            or p.get("name")
+            or ""
+        )
+        place = str(place).strip()
+        state = str(p.get("state") or "").strip()
+        if place and state and state not in place:
+            label = f"{place}, {state}"
+        elif place:
+            label = place
+        elif state:
+            label = state
+        else:
+            label = f"{float(lat):.2f}°, {float(lon):.2f}°"
+    except Exception:
+        label = f"{float(lat):.2f}°, {float(lon):.2f}°"
+    _PLACE_CACHE[key] = label
+    return label
+
 
 FIELDS = [
     {"name": "Brucelea Poultry", "lat": 44.035611, "lon": -81.608750},
@@ -248,6 +294,17 @@ def _rain_details_text(wx) -> str:
     return f"When: {summary}{peak}"
 
 
+def _wind_alert_text(wx) -> str:
+    w = wx.get("wind_kmh")
+    try:
+        w = float(w)
+    except (TypeError, ValueError):
+        return ""
+    if w < WIND_ALERT_KMH:
+        return ""
+    return f" · *Wind:* {w:.0f} km/h"
+
+
 def fetch_weather(lat, lon):
     url = (
         "https://api.open-meteo.com/v1/forecast"
@@ -297,8 +354,9 @@ def parse_today(data):
 def collect_results(verbose=True):
     results = []
     for i, field in enumerate(FIELDS, 1):
+        near = forecast_reference_place(field["lat"], field["lon"])
         if verbose:
-            print(f"  [{i:02d}/{len(FIELDS)}] {field['name']}...", end=" ", flush=True)
+            print(f"  [{i:02d}/{len(FIELDS)}] {field['name']} ({near})...", end=" ", flush=True)
         data = fetch_weather(field["lat"], field["lon"])
         wx = parse_today(data)
         if verbose:
@@ -311,7 +369,7 @@ def collect_results(verbose=True):
                 print(f"{wx['rain_pct']}% · {wx['max_temp']}°C · {t}")
             else:
                 print("failed")
-        results.append({"name": field["name"], "wx": wx})
+        results.append({"name": field["name"], "wx": wx, "near": near})
     return results
 
 
@@ -361,6 +419,7 @@ def build_slack_blocks(results):
         )
         for r in rain_fields:
             wx = r["wx"]
+            near = r.get("near") or "—"
             desc, emoji = wmo_label(wx["wmo"])
             _, tmr_emoji = wmo_label(wx.get("tmr_wmo"))
             tmr_rain = wx.get("tmr_rain")
@@ -368,10 +427,11 @@ def build_slack_blocks(results):
             precip = wx["precip_mm"] if wx["precip_mm"] is not None else 0.0
             precip = float(precip)
             when = _rain_details_text(wx)
+            wind_alert = _wind_alert_text(wx)
             line = (
-                f"*{emoji} {r['name']}*\n"
+                f"*{emoji} {r['name']}* · _{near}_\n"
                 f"*Forecast:* {desc}\n"
-                f"*High/low:* {wx['max_temp']}°C / {wx['min_temp']}°C · *Wind max:* {wx['wind_kmh']} km/h\n"
+                f"*High/low:* {wx['max_temp']}°C / {wx['min_temp']}°C{wind_alert}\n"
                 f"*Rain:* {wx['rain_pct']}% (peak) · *Total:* {precip:.1f} mm\n"
                 f"*{when}*{tmr_str}"
             )
@@ -388,13 +448,15 @@ def build_slack_blocks(results):
         lines = []
         for r in clear_fields:
             wx = r["wx"]
+            near = r.get("near") or "—"
             desc, emoji = wmo_label(wx["wmo"])
             rain_pct = wx["rain_pct"] if wx["rain_pct"] is not None else 0
             precip = wx["precip_mm"] if wx["precip_mm"] is not None else 0.0
             when = _rain_details_text(wx)
+            wind_alert = _wind_alert_text(wx)
             lines.append(
-                f"{emoji} *{r['name']}*\n"
-                f"Forecast: {desc} · Hi/lo: {wx['max_temp']}°/{wx['min_temp']}°C · Wind: {wx['wind_kmh']} km/h\n"
+                f"{emoji} *{r['name']}* · _{near}_\n"
+                f"Forecast: {desc} · Hi/lo: {wx['max_temp']}°/{wx['min_temp']}°C{wind_alert}\n"
                 f"Rain: {rain_pct}% · Total: {float(precip):.1f} mm · {when}"
             )
         chunk = []
@@ -420,7 +482,7 @@ def build_slack_blocks(results):
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": "Open-Meteo · America/Toronto",
+                    "text": "Open-Meteo (lat/lon grid) · place labels: Photon · America/Toronto",
                 }
             ],
         }
