@@ -13,11 +13,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import io
 import json
+import math
 import os
 import threading
 import time
 import urllib.request
+from collections import OrderedDict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -26,6 +29,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET", "").strip()
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "").strip()
+SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "").strip()
 _SLASH = os.environ.get("SLACK_SLASH_COMMAND", "/fieldweather").strip()
 SLACK_SLASH_COMMAND = _SLASH if _SLASH.startswith("/") else f"/{_SLASH}"
 
@@ -118,6 +123,47 @@ FIELDS = [
     {"name": "Roland McAlpine", "lat": 42.772590, "lon": -81.813925},
 ]
 
+REGION_FIELDS: OrderedDict[str, list[str]] = OrderedDict([
+    ("South", [
+        "Martin Gerrits", "Kerrigan", "Sydenham-1 (Bogaert)", "Sydenham-2",
+        "Burm", "Scott Campbell", "Wecker", "Bercab Farms",
+    ]),
+    ("South Central", [
+        "Roland McAlpine", "Field and Flock (1)", "Field and Flock (2)",
+        "Moosberger Farms", "Peters", "Veldale", "John McRoberts",
+    ]),
+    ("Central", [
+        "Benderbrook", "Schumhaven Farms", "Triple Lane Farms",
+        "Harrison Farms", "Clair Horst", "Gerber Acres", "Greg Leis",
+    ]),
+    ("Arthur", ["Klavan", "Triaro Farms", "Judd / Marvara"]),
+    ("Mildmay", [
+        "Grubb / GerMar Farms", "Schaus / Brad Haack", "Lang Farms",
+        "Renwick-1", "Renwick-2",
+    ]),
+    ("West Coast", ["Wettlaufer", "Brucelea Poultry"]),
+    ("North", ["Biermans Farms", "Christie-1", "Christie-2", "Highland Farms"]),
+])
+
+_SHORT: dict[str, str] = {
+    "Martin Gerrits": "Gerrits", "Kerrigan": "Kerrigan",
+    "Sydenham-1 (Bogaert)": "Sydenham-1", "Sydenham-2": "Sydenham-2",
+    "Burm": "Burm", "Scott Campbell": "Campbell",
+    "Wecker": "Wecker", "Bercab Farms": "Bercab",
+    "Roland McAlpine": "McAlpine", "Field and Flock (1)": "F&F (1)",
+    "Field and Flock (2)": "F&F (2)", "Moosberger Farms": "Moosberger",
+    "Peters": "Peters", "Veldale": "Veldale", "John McRoberts": "McRoberts",
+    "Benderbrook": "Benderbrook", "Schumhaven Farms": "Schumhaven",
+    "Triple Lane Farms": "Triple Lane", "Harrison Farms": "Harrison",
+    "Clair Horst": "Horst", "Gerber Acres": "Gerber", "Greg Leis": "Leis",
+    "Klavan": "Klavan", "Triaro Farms": "Triaro", "Judd / Marvara": "Marvara",
+    "Grubb / GerMar Farms": "GerMar", "Schaus / Brad Haack": "Schaus",
+    "Lang Farms": "Lang", "Renwick-1": "Renwick-1", "Renwick-2": "Renwick-2",
+    "Wettlaufer": "Wettlaufer", "Brucelea Poultry": "Brucelea",
+    "Biermans Farms": "Biermans", "Christie-1": "Christie-1",
+    "Christie-2": "Christie-2", "Highland Farms": "Highland",
+}
+
 WMO = {
     0: ("Clear sky", "☀️"),
     1: ("Mainly clear", "🌤️"),
@@ -150,6 +196,237 @@ def wmo_label(code):
     if code is None:
         return ("Unknown", "❓")
     return WMO.get(int(code), (f"Code {code}", "🌡️"))
+
+
+# --- image generation ---
+
+_CELL_W = 112
+_HDR_H = 32
+_NAME_H = 36
+_ICON_H = 72
+_ALERT_H = 42
+_C_BG = (22, 22, 22)
+_C_GRID = (52, 52, 52)
+_C_HDRBAR = (38, 38, 38)
+_C_TEXT = (222, 222, 222)
+_C_DIM = (130, 130, 130)
+
+
+def _pil_font(size: int):
+    try:
+        from PIL import ImageFont
+        for path in [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+        ]:
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def _txt(draw, text: str, bx: int, by: int, bw: int, bh: int, font, color):
+    cx, cy = bx + bw // 2, by + bh // 2
+    try:
+        draw.text((cx, cy), text, font=font, fill=color, anchor="mm")
+    except Exception:
+        draw.text((bx + 4, by + bh // 2 - 6), text, fill=color)
+
+
+def _sun(draw, x, y, w, h):
+    cx, cy, r = x + w // 2, y + h // 2, min(w, h) // 3
+    for i in range(8):
+        a = i * math.pi / 4
+        draw.line(
+            [cx + int((r + 2) * math.cos(a)), cy + int((r + 2) * math.sin(a)),
+             cx + int((r + 9) * math.cos(a)), cy + int((r + 9) * math.sin(a))],
+            fill=(255, 200, 0), width=2,
+        )
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(255, 200, 0))
+
+
+def _cloud(draw, x, y, w, h, col=(108, 108, 112)):
+    px = lambda f: x + int(w * f)
+    py = lambda f: y + int(h * f)
+    draw.ellipse([px(.05), py(.30), px(.45), py(.90)], fill=col)
+    draw.ellipse([px(.25), py(.10), px(.72), py(.70)], fill=col)
+    draw.ellipse([px(.52), py(.30), px(.95), py(.90)], fill=col)
+    draw.rectangle([px(.05), py(.55), px(.95), py(.90)], fill=col)
+
+
+def _drops(draw, x, y, w, h, n=3, col=(65, 128, 210)):
+    step = w // (n + 1)
+    for i in range(n):
+        rx = x + step * (i + 1)
+        draw.line([rx, y + 2, rx - 5, y + h - 2], fill=col, width=2)
+
+
+def _bolt(draw, x, y, w, h):
+    cx = x + w // 2
+    pts = [(cx + 6, y), (cx - 4, y + h // 2), (cx + 5, y + h // 2), (cx - 5, y + h)]
+    draw.polygon(pts, fill=(255, 220, 30))
+
+
+def _snow_dots(draw, x, y, w, h, n=4):
+    step = w // (n + 1)
+    for i in range(n):
+        sx, sy, r = x + step * (i + 1), y + h // 2, 4
+        draw.ellipse([sx - r, sy - r, sx + r, sy + r], fill=(185, 215, 255))
+
+
+def _weather_icon(draw, x, y, w, h, wmo_code: int):
+    p = 6
+    ch = int(h * 0.56)
+    bx, by = x + p, y + p
+    bw, bh = w - 2 * p, h - 2 * p
+    if wmo_code == 0:
+        _sun(draw, bx, by, bw, bh)
+    elif wmo_code in (1, 2):
+        _sun(draw, bx, by, bw * 2 // 3, bh * 2 // 3)
+        _cloud(draw, x + w // 5, y + h // 4, w - w // 5 - p, h - h // 4 - p, col=(125, 125, 128))
+    elif wmo_code == 3:
+        _cloud(draw, bx, by, bw, bh, col=(88, 88, 92))
+    elif wmo_code in (45, 48):
+        for i in range(3):
+            fy = by + i * bh // 3
+            draw.rectangle([bx, fy, bx + bw, fy + 4], fill=(155, 155, 155))
+    elif wmo_code in (51, 53, 55):
+        _cloud(draw, bx, by, bw, ch - p)
+        _drops(draw, bx, y + ch, bw, h - ch - p, n=2, col=(100, 155, 220))
+    elif wmo_code in (61, 63, 65, 80, 81, 82):
+        _cloud(draw, bx, by, bw, ch - p)
+        _drops(draw, bx, y + ch, bw, h - ch - p)
+    elif wmo_code in (95, 96, 99):
+        _cloud(draw, bx, by, bw, ch - p, col=(68, 68, 72))
+        mid = bw // 3
+        _bolt(draw, bx + bw // 2 - mid // 2, y + ch, mid, (h - ch) // 2)
+        _drops(draw, bx, y + ch + (h - ch) // 2, bw, (h - ch) // 2 - p, n=2)
+    elif wmo_code in (71, 73, 75, 77, 85, 86):
+        _cloud(draw, bx, by, bw, ch - p)
+        _snow_dots(draw, bx, y + ch, bw, h - ch - p)
+
+
+def _alert_cell(draw, x, y, w, h, frost_c, is_failed: bool):
+    if is_failed:
+        cx, cy, r = x + w // 2, y + h // 2, min(w, h) // 5
+        draw.line([cx - r, cy - r, cx + r, cy + r], fill=(90, 90, 90), width=2)
+        draw.line([cx + r, cy - r, cx - r, cy + r], fill=(90, 90, 90), width=2)
+        return
+    if frost_c is not None and frost_c <= FROST_ALERT_C:
+        cx = x + w // 2
+        th = min(w, h) * 3 // 4
+        ty = y + (h - th) // 2
+        pts = [(cx, ty), (cx - th // 2, ty + th), (cx + th // 2, ty + th)]
+        draw.polygon(pts, fill=(28, 78, 200))
+        draw.rectangle([cx - 1, ty + 6, cx + 1, ty + th * 2 // 3], fill=(255, 255, 255))
+        draw.ellipse([cx - 2, ty + th * 2 // 3 + 2, cx + 2, ty + th * 2 // 3 + 6], fill=(255, 255, 255))
+
+
+def generate_region_image(region_name: str, field_results: list) -> bytes | None:
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+    n = len(field_results)
+    if n == 0:
+        return None
+    img_w = n * _CELL_W
+    img_h = _HDR_H + _NAME_H + _ICON_H + _ALERT_H
+    img = Image.new("RGB", (img_w, img_h), _C_BG)
+    draw = ImageDraw.Draw(img)
+    fhdr = _pil_font(15)
+    fname = _pil_font(10)
+
+    draw.rectangle([0, 0, img_w, _HDR_H], fill=_C_HDRBAR)
+    _txt(draw, region_name, 0, 0, img_w, _HDR_H, fhdr, _C_TEXT)
+    draw.line([0, _HDR_H, img_w, _HDR_H], fill=_C_GRID)
+    draw.line([0, _HDR_H + _NAME_H, img_w, _HDR_H + _NAME_H], fill=_C_GRID)
+    draw.line([0, _HDR_H + _NAME_H + _ICON_H, img_w, _HDR_H + _NAME_H + _ICON_H], fill=_C_GRID)
+
+    for i, r in enumerate(field_results):
+        cx = i * _CELL_W
+        if i > 0:
+            draw.line([cx, _HDR_H, cx, img_h], fill=_C_GRID)
+        wx = r.get("wx")
+        name = _SHORT.get(r["name"], r["name"])
+        _txt(draw, name, cx, _HDR_H, _CELL_W, _NAME_H, fname, _C_DIM if not wx else _C_TEXT)
+        if wx and wx.get("wmo") is not None:
+            _weather_icon(draw, cx + 4, _HDR_H + _NAME_H + 4, _CELL_W - 8, _ICON_H - 8, int(wx["wmo"]))
+        sf = (wx or {}).get("snow_frost") or {}
+        frost_c = sf.get("low_c") if sf.get("frost_risk") else None
+        _alert_cell(draw, cx + 4, _HDR_H + _NAME_H + _ICON_H + 4, _CELL_W - 8, _ALERT_H - 8, frost_c, not wx)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+# --- Slack image upload ---
+
+def _slack_upload_image(image_bytes: bytes, region_name: str) -> bool:
+    slug = region_name.lower().replace(" ", "_")
+    params = urlencode({"filename": f"weather_{slug}.png", "length": len(image_bytes)})
+    req = urllib.request.Request(
+        f"https://slack.com/api/files.getUploadURLExternal?{params}",
+        headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        print(f"getUploadURLExternal: {e}")
+        return False
+    if not data.get("ok"):
+        print(f"getUploadURLExternal error: {data.get('error')}")
+        return False
+    put_req = urllib.request.Request(
+        data["upload_url"], data=image_bytes,
+        headers={"Content-Type": "image/png"}, method="PUT",
+    )
+    try:
+        with urllib.request.urlopen(put_req, timeout=30):
+            pass
+    except Exception as e:
+        print(f"image PUT: {e}")
+        return False
+    body = json.dumps({
+        "files": [{"id": data["file_id"], "title": f"{region_name} Weather"}],
+        "channel_id": SLACK_CHANNEL_ID,
+    }).encode()
+    comp_req = urllib.request.Request(
+        "https://slack.com/api/files.completeUploadExternal", data=body,
+        headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(comp_req, timeout=15) as r:
+            result = json.loads(r.read())
+    except Exception as e:
+        print(f"completeUploadExternal: {e}")
+        return False
+    if not result.get("ok"):
+        print(f"completeUploadExternal error: {result.get('error')}")
+        return False
+    return True
+
+
+def post_region_images(results: list):
+    by_name = {r["name"]: r for r in results}
+    for region_name, field_names in REGION_FIELDS.items():
+        region_results = [by_name[fn] for fn in field_names if fn in by_name]
+        if not region_results:
+            continue
+        print(f"  Image: {region_name}...", end=" ", flush=True)
+        img_bytes = generate_region_image(region_name, region_results)
+        if not img_bytes:
+            print("PIL unavailable")
+            continue
+        ok = _slack_upload_image(img_bytes, region_name)
+        print("ok" if ok else "failed")
 
 
 def _format_report_date(d):
@@ -374,92 +651,78 @@ def collect_results(verbose=True):
 
 
 def build_slack_blocks(results):
-    today_str = _format_report_date(datetime.now())
+    wx_date = next((r["wx"]["date"] for r in results if r.get("wx")), None)
+    today_str = (
+        _format_report_date(datetime.strptime(wx_date, "%Y-%m-%d"))
+        if wx_date else _format_report_date(datetime.now())
+    )
+    by_name = {r["name"]: r for r in results}
 
-    rain_fields = [
-        r
-        for r in results
+    total_rain = sum(
+        1 for r in results
         if r["wx"] and r["wx"]["rain_pct"] is not None and r["wx"]["rain_pct"] >= RAIN_ALERT_THRESHOLD
-    ]
-    clear_fields = [
-        r
-        for r in results
-        if r["wx"] and (r["wx"]["rain_pct"] is None or r["wx"]["rain_pct"] < RAIN_ALERT_THRESHOLD)
-    ]
-    error_fields = [r for r in results if not r["wx"]]
-
-    rain_fields.sort(key=lambda x: x["wx"]["rain_pct"], reverse=True)
+    )
+    total_frost = sum(
+        1 for r in results
+        if r["wx"] and isinstance(r["wx"].get("snow_frost"), dict)
+        and (r["wx"]["snow_frost"].get("frost_risk") or r["wx"]["snow_frost"].get("snow_signal"))
+    )
+    total_failed = sum(1 for r in results if not r["wx"])
 
     blocks = [
-        {
-            "type": "header",
-            "text": {"type": "plain_text", "text": "Upside Fields — Daily Weather"},
-        },
+        {"type": "header", "text": {"type": "plain_text", "text": "Upside Fields — Daily Weather"}},
         {
             "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"*{today_str}* · {len(results)} fields · "
-                        f"{len(rain_fields)} rain risk ≥{RAIN_ALERT_THRESHOLD}%"
-                    ),
-                }
-            ],
+            "elements": [{"type": "mrkdwn", "text": (
+                f"*{today_str}* · {len(results)} fields · "
+                f"{total_rain} rain ≥{RAIN_ALERT_THRESHOLD}% · {total_frost} frost/snow"
+                + (f" · {total_failed} failed" if total_failed else "")
+            )}],
         },
         {"type": "divider"},
     ]
 
-    if rain_fields:
-        blocks.append(
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*Rain risk today ({len(rain_fields)})*"},
-            }
-        )
-        for r in rain_fields:
-            wx = r["wx"]
-            near = r.get("near") or "—"
-            desc, emoji = wmo_label(wx["wmo"])
-            _, tmr_emoji = wmo_label(wx.get("tmr_wmo"))
-            tmr_rain = wx.get("tmr_rain")
-            tmr_str = f" · Tomorrow: {tmr_emoji} {tmr_rain}%" if tmr_rain is not None else ""
-            precip = wx["precip_mm"] if wx["precip_mm"] is not None else 0.0
-            precip = float(precip)
-            when = _rain_details_text(wx)
-            wind_alert = _wind_alert_text(wx)
-            line = (
-                f"*{emoji} {r['name']}* · _{near}_\n"
-                f"*Forecast:* {desc}\n"
-                f"*High/low:* {wx['max_temp']}°C / {wx['min_temp']}°C{wind_alert}\n"
-                f"*Rain:* {wx['rain_pct']}% (peak) · *Total:* {precip:.1f} mm\n"
-                f"*{when}*{tmr_str}"
-            )
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": line}})
-        blocks.append({"type": "divider"})
+    for region_name, field_names in REGION_FIELDS.items():
+        region_results = [by_name[fn] for fn in field_names if fn in by_name]
+        if not region_results:
+            continue
 
-    if clear_fields:
-        blocks.append(
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*Low rain risk ({len(clear_fields)})*"},
-            }
+        rain_n = sum(
+            1 for r in region_results
+            if r["wx"] and r["wx"]["rain_pct"] is not None and r["wx"]["rain_pct"] >= RAIN_ALERT_THRESHOLD
         )
+        frost_n = sum(
+            1 for r in region_results
+            if r["wx"] and isinstance(r["wx"].get("snow_frost"), dict)
+            and (r["wx"]["snow_frost"].get("frost_risk") or r["wx"]["snow_frost"].get("snow_signal"))
+        )
+        badges = (["🌧️ " + str(rain_n)] if rain_n else []) + (["🧊 " + str(frost_n)] if frost_n else [])
+        hdr = f"*{region_name}*  ·  {len(region_results)} fields"
+        if badges:
+            hdr += "  ·  " + "  ".join(badges)
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": hdr}})
+
         lines = []
-        for r in clear_fields:
+        for r in region_results:
             wx = r["wx"]
-            near = r.get("near") or "—"
-            desc, emoji = wmo_label(wx["wmo"])
+            short = _SHORT.get(r["name"], r["name"])
+            if not wx:
+                lines.append(f"❓ *{short}* · _failed_")
+                continue
+            _, emoji = wmo_label(wx["wmo"])
             rain_pct = wx["rain_pct"] if wx["rain_pct"] is not None else 0
-            precip = wx["precip_mm"] if wx["precip_mm"] is not None else 0.0
-            when = _rain_details_text(wx)
-            wind_alert = _wind_alert_text(wx)
+            sf = wx.get("snow_frost") or {}
+            rain_str = f"*{rain_pct}%*" if rain_pct >= RAIN_ALERT_THRESHOLD else f"{rain_pct}%"
+            frost_str = ""
+            if sf.get("frost_risk"):
+                lc = sf.get("low_c")
+                frost_str = f" · 🧊 {lc:.1f}°C" if lc is not None else " · 🧊"
+            wind_str = _wind_alert_text(wx)
             lines.append(
-                f"{emoji} *{r['name']}* · _{near}_\n"
-                f"Forecast: {desc} · Hi/lo: {wx['max_temp']}°/{wx['min_temp']}°C{wind_alert}\n"
-                f"Rain: {rain_pct}% · Total: {float(precip):.1f} mm · {when}"
+                f"{emoji} *{short}* · {wx['max_temp']}°/{wx['min_temp']}°C · {rain_str}{frost_str}{wind_str}"
             )
-        chunk = []
+
+        chunk: list[str] = []
         for line in lines:
             chunk.append(line)
             if len(chunk) == 8:
@@ -468,25 +731,28 @@ def build_slack_blocks(results):
         if chunk:
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(chunk)}})
 
-    if error_fields:
-        blocks.append({"type": "divider"})
-        names = ", ".join(r["name"] for r in error_fields)
-        blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Fetch failed:* {names}"}}
-        )
+        rain_detail = [
+            r for r in region_results
+            if r["wx"] and r["wx"]["rain_pct"] is not None and r["wx"]["rain_pct"] >= RAIN_ALERT_THRESHOLD
+        ]
+        if rain_detail:
+            det = []
+            for r in rain_detail:
+                wx = r["wx"]
+                short = _SHORT.get(r["name"], r["name"])
+                when = _rain_details_text(wx)
+                precip = float(wx["precip_mm"] or 0)
+                _, tmr_e = wmo_label(wx.get("tmr_wmo"))
+                tmr = f" · tmr {tmr_e} {wx['tmr_rain']}%" if wx.get("tmr_rain") is not None else ""
+                det.append(f"↳ *{short}*: {wx['rain_pct']}% · {precip:.1f} mm · {when}{tmr}")
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(det)}})
 
-    blocks.append({"type": "divider"})
-    blocks.append(
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": "Open-Meteo (lat/lon grid) · place labels: Photon · America/Toronto",
-                }
-            ],
-        }
-    )
+        blocks.append({"type": "divider"})
+
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": "Open-Meteo · Photon · America/Toronto"}],
+    })
     return blocks
 
 
@@ -626,8 +892,13 @@ def make_handler():
 def cmd_post(_args):
     print(f"Weather bot — {datetime.now():%Y-%m-%d %H:%M} · {len(FIELDS)} fields\n")
     results = collect_results(verbose=True)
-    print("\nPosting…")
+    print("\nPosting summary…")
     post_to_slack(build_slack_blocks(results))
+    if SLACK_BOT_TOKEN and SLACK_CHANNEL_ID:
+        print("Uploading region images…")
+        post_region_images(results)
+    else:
+        print("(Set SLACK_BOT_TOKEN + SLACK_CHANNEL_ID to enable region table images)")
 
 
 def cmd_dry_run(_args):
