@@ -551,24 +551,30 @@ def _rain_timing_details(data, today_date: str, daily_precip_mm):
     }
 
 
-def _rain_details_text(wx) -> str:
-    timing = wx.get("rain_timing")
-    if not timing or not isinstance(timing, dict):
-        return "When: —"
-    summary = timing.get("summary") or "—"
-    peak_mm = timing.get("peak_mm")
-    peak_mm_time = timing.get("peak_mm_time")
-    peak_prob = timing.get("peak_prob")
-    peak_prob_time = timing.get("peak_prob_time")
-    peak_parts = []
-    if peak_mm is not None and peak_mm_time:
-        peak_parts.append(f"peak mm: {_fmt_clock(_parse_hour_ts(peak_mm_time))} ({float(peak_mm):.1f} mm)")
-    if peak_prob is not None and peak_prob_time:
-        peak_parts.append(
-            f"peak %: {_fmt_clock(_parse_hour_ts(peak_prob_time))} ({int(round(float(peak_prob)))}%)"
-        )
-    peak = f" · {' · '.join(peak_parts)}" if peak_parts else ""
-    return f"When: {summary}{peak}"
+
+def _temp_badge(max_temp, min_temp) -> str:
+    """🔴/🔵 dots scaled to how extreme the day's high or low is."""
+    try:
+        hi = float(max_temp)
+        if hi >= 36:
+            return " 🔴🔴🔴"
+        if hi >= 32:
+            return " 🔴🔴"
+        if hi >= 28:
+            return " 🔴"
+    except (TypeError, ValueError):
+        pass
+    try:
+        lo = float(min_temp)
+        if lo <= -20:
+            return " 🔵🔵🔵"
+        if lo <= -10:
+            return " 🔵🔵"
+        if lo <= -5:
+            return " 🔵"
+    except (TypeError, ValueError):
+        pass
+    return ""
 
 
 def _wind_alert_text(wx) -> str:
@@ -658,10 +664,15 @@ def build_slack_blocks(results):
     )
     by_name = {r["name"]: r for r in results}
 
-    total_rain = sum(
-        1 for r in results
-        if r["wx"] and r["wx"]["rain_pct"] is not None and r["wx"]["rain_pct"] >= RAIN_ALERT_THRESHOLD
-    )
+    def _rain_alert(wx) -> bool:
+        return (
+            wx is not None
+            and wx["rain_pct"] is not None
+            and wx["rain_pct"] >= RAIN_ALERT_THRESHOLD
+            and float(wx["precip_mm"] or 0) >= 1.0
+        )
+
+    total_rain = sum(1 for r in results if _rain_alert(r["wx"]))
     total_frost = sum(
         1 for r in results
         if r["wx"] and isinstance(r["wx"].get("snow_frost"), dict)
@@ -687,10 +698,7 @@ def build_slack_blocks(results):
         if not region_results:
             continue
 
-        rain_n = sum(
-            1 for r in region_results
-            if r["wx"] and r["wx"]["rain_pct"] is not None and r["wx"]["rain_pct"] >= RAIN_ALERT_THRESHOLD
-        )
+        rain_n = sum(1 for r in region_results if _rain_alert(r["wx"]))
         frost_n = sum(
             1 for r in region_results
             if r["wx"] and isinstance(r["wx"].get("snow_frost"), dict)
@@ -711,15 +719,25 @@ def build_slack_blocks(results):
                 continue
             _, emoji = wmo_label(wx["wmo"])
             rain_pct = wx["rain_pct"] if wx["rain_pct"] is not None else 0
+            precip = float(wx["precip_mm"] or 0)
             sf = wx.get("snow_frost") or {}
-            rain_str = f"*{rain_pct}%*" if rain_pct >= RAIN_ALERT_THRESHOLD else f"{rain_pct}%"
+            alert = _rain_alert(wx)
+            rain_str = f"*{rain_pct}% / {precip:.1f}mm*" if alert else f"{rain_pct}% / {precip:.1f}mm"
             frost_str = ""
             if sf.get("frost_risk"):
                 lc = sf.get("low_c")
                 frost_str = f" · 🧊 {lc:.1f}°C" if lc is not None else " · 🧊"
             wind_str = _wind_alert_text(wx)
+            temp_str = _temp_badge(wx["max_temp"], wx["min_temp"])
+            rt = wx.get("rain_timing")
+            when_str = ""
+            if isinstance(rt, dict) and rt.get("summary") and rt["summary"] not in (
+                "No meaningful rain in the hourly outlook.",
+                "Light / scattered in the model (no clear hourly peak).",
+            ):
+                when_str = f" · {rt['summary']}"
             lines.append(
-                f"{emoji} *{short}* · {wx['max_temp']}°/{wx['min_temp']}°C · {rain_str}{frost_str}{wind_str}"
+                f"{emoji} *{short}* · {wx['max_temp']}°/{wx['min_temp']}°C{temp_str} · {rain_str}{when_str}{frost_str}{wind_str}"
             )
 
         chunk: list[str] = []
@@ -730,22 +748,6 @@ def build_slack_blocks(results):
                 chunk = []
         if chunk:
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(chunk)}})
-
-        rain_detail = [
-            r for r in region_results
-            if r["wx"] and r["wx"]["rain_pct"] is not None and r["wx"]["rain_pct"] >= RAIN_ALERT_THRESHOLD
-        ]
-        if rain_detail:
-            det = []
-            for r in rain_detail:
-                wx = r["wx"]
-                short = _SHORT.get(r["name"], r["name"])
-                when = _rain_details_text(wx)
-                precip = float(wx["precip_mm"] or 0)
-                _, tmr_e = wmo_label(wx.get("tmr_wmo"))
-                tmr = f" · tmr {tmr_e} {wx['tmr_rain']}%" if wx.get("tmr_rain") is not None else ""
-                det.append(f"↳ *{short}*: {wx['rain_pct']}% · {precip:.1f} mm · {when}{tmr}")
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(det)}})
 
         blocks.append({"type": "divider"})
 
