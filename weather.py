@@ -736,6 +736,10 @@ def build_slack_blocks(results):
                 "Light / scattered in the model (no clear hourly peak).",
             ):
                 when_str = f" · {rt['summary']}"
+                peak_mm = rt.get("peak_mm")
+                peak_mm_time = rt.get("peak_mm_time")
+                if peak_mm is not None and peak_mm_time and float(peak_mm) >= 0.1:
+                    when_str += f" (peak {_fmt_clock(_parse_hour_ts(peak_mm_time))}, {float(peak_mm):.1f}mm)"
             lines.append(
                 f"{emoji} *{short}* · {wx['max_temp']}°/{wx['min_temp']}°C{temp_str} · {rain_str}{when_str}{frost_str}{wind_str}"
             )
