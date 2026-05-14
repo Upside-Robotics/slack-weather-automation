@@ -601,7 +601,11 @@ def fetch_weather(lat, lon):
     )
     try:
         with urllib.request.urlopen(url, timeout=15) as r:
-            return json.loads(r.read())
+            data = json.loads(r.read())
+        if data.get("error"):
+            print(f"  ! {lat},{lon}: API error — {data.get('reason', data)}")
+            return None
+        return data
     except Exception as e:
         print(f"  ! {lat},{lon}: {e}")
         return None
