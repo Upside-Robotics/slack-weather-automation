@@ -721,7 +721,7 @@ def build_slack_blocks(results):
             if not wx:
                 lines.append(f"❓ *{short}* · _failed_")
                 continue
-            _, emoji = wmo_label(wx["wmo"])
+            condition, emoji = wmo_label(wx["wmo"])
             rain_pct = wx["rain_pct"] if wx["rain_pct"] is not None else 0
             precip = float(wx["precip_mm"] or 0)
             sf = wx.get("snow_frost") or {}
@@ -745,7 +745,7 @@ def build_slack_blocks(results):
                 if peak_mm is not None and peak_mm_time and float(peak_mm) >= 0.1:
                     when_str += f" (peak {_fmt_clock(_parse_hour_ts(peak_mm_time))}, {float(peak_mm):.1f}mm)"
             lines.append(
-                f"{emoji} *{short}* · {wx['max_temp']}°/{wx['min_temp']}°C{temp_str} · {rain_str}{when_str}{frost_str}{wind_str}"
+                f"{emoji} *{short}* · {condition} · {wx['max_temp']}°/{wx['min_temp']}°C{temp_str} · {rain_str}{when_str}{frost_str}{wind_str}"
             )
 
         chunk: list[str] = []
