@@ -3,11 +3,11 @@ name: Daily Field Weather Report
 on:
   schedule:
     # GitHub cron is UTC. These are set for America/Toronto when on EDT (UTC-4):
-    # - 07:30 EDT = 11:30 UTC
-    # - 14:30 EDT = 18:30 UTC
-    # When on EST (UTC-5) they will run at 06:30 and 13:30 local.
-    - cron: "30 11 * * *"
-    - cron: "30 18 * * *"
+    # - 04:00 EDT = 08:00 UTC
+    # - 17:00 EDT = 21:00 UTC
+    # When on EST (UTC-5) they will run at 03:00 and 16:00 local.
+    - cron: "0 8 * * *"
+    - cron: "0 21 * * *"
   workflow_dispatch:
 
 permissions:
