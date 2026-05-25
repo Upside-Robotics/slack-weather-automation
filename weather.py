@@ -588,13 +588,50 @@ def _wind_alert_text(wx) -> str:
     return f" · *Wind:* {w:.0f} km/h"
 
 
+def _uv_label(uv: float) -> str:
+    if uv < 3:
+        return "Low"
+    if uv < 6:
+        return "Moderate"
+    if uv < 8:
+        return "High"
+    if uv < 11:
+        return "Very High"
+    return "Extreme"
+
+
+def _heat_info_text(wx) -> str:
+    try:
+        hi = float(wx["max_temp"])
+    except (TypeError, ValueError):
+        return ""
+    if hi < 28:
+        return ""
+    parts = []
+    if wx.get("heat_wave"):
+        parts.append("🔥 *Heat wave*")
+    apparent = wx.get("apparent_max")
+    try:
+        parts.append(f"feels like {float(apparent):.0f}°C")
+    except (TypeError, ValueError):
+        pass
+    uv = wx.get("uv_max")
+    try:
+        uv_val = float(uv)
+        parts.append(f"UV {uv_val:.0f} ({_uv_label(uv_val)})")
+    except (TypeError, ValueError):
+        pass
+    return (" · " + ", ".join(parts)) if parts else ""
+
+
 def fetch_weather(lat, lon):
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={lat}&longitude={lon}"
         "&daily=temperature_2m_max,temperature_2m_min,"
         "precipitation_sum,precipitation_probability_max,"
-        "weathercode,windspeed_10m_max"
+        "weathercode,windspeed_10m_max,"
+        "apparent_temperature_max,uv_index_max"
         "&hourly=precipitation,precipitation_probability"
         "&timezone=America%2FToronto"
         "&forecast_days=3"
@@ -619,15 +656,22 @@ def parse_today(data):
         today = d["time"][0]
         precip_mm = d["precipitation_sum"][0]
         rain_timing = _rain_timing_details(data, today, precip_mm)
+        highs = d["temperature_2m_max"]
+        heat_wave = sum(1 for t in highs[:3] if t is not None and float(t) >= 32) >= 2
+        apparent_max = (d.get("apparent_temperature_max") or [None])[0]
+        uv_max = (d.get("uv_index_max") or [None])[0]
         return {
             "date": today,
-            "max_temp": d["temperature_2m_max"][0],
+            "max_temp": highs[0],
             "min_temp": d["temperature_2m_min"][0],
             "precip_mm": precip_mm,
             "rain_pct": d["precipitation_probability_max"][0],
             "wmo": d["weathercode"][0],
             "wind_kmh": d["windspeed_10m_max"][0],
             "rain_timing": rain_timing,
+            "apparent_max": apparent_max,
+            "uv_max": uv_max,
+            "heat_wave": heat_wave,
             "tmr_rain": d["precipitation_probability_max"][1]
             if len(d["precipitation_probability_max"]) > 1
             else None,
@@ -744,8 +788,9 @@ def build_slack_blocks(results):
                 peak_mm_time = rt.get("peak_mm_time")
                 if peak_mm is not None and peak_mm_time and float(peak_mm) >= 0.1:
                     when_str += f" (peak {_fmt_clock(_parse_hour_ts(peak_mm_time))}, {float(peak_mm):.1f}mm)"
+            heat_str = _heat_info_text(wx)
             lines.append(
-                f"{emoji} *{short}* · {condition} · {wx['max_temp']}°/{wx['min_temp']}°C{temp_str} · {rain_str}{when_str}{frost_str}{wind_str}"
+                f"{emoji} *{short}* · {condition} · {wx['max_temp']}°/{wx['min_temp']}°C{temp_str}{heat_str} · {rain_str}{when_str}{frost_str}{wind_str}"
             )
 
         chunk: list[str] = []
