@@ -636,16 +636,20 @@ def fetch_weather(lat, lon):
         "&timezone=America%2FToronto"
         "&forecast_days=3"
     )
-    try:
-        with urllib.request.urlopen(url, timeout=15) as r:
-            data = json.loads(r.read())
-        if data.get("error"):
-            print(f"  ! {lat},{lon}: API error — {data.get('reason', data)}")
-            return None
-        return data
-    except Exception as e:
-        print(f"  ! {lat},{lon}: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=15) as r:
+                data = json.loads(r.read())
+            if data.get("error"):
+                print(f"  ! {lat},{lon}: API error — {data.get('reason', data)}")
+                return None
+            return data
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(3 * (attempt + 1))
+            else:
+                print(f"  ! {lat},{lon}: {e}")
+    return None
 
 
 def parse_today(data):
