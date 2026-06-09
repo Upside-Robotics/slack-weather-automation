@@ -1,0 +1,26 @@
+name: Rain Alert
+
+on:
+  schedule:
+    # Every 2 hours, 10:00–22:00 UTC (06:00–18:00 EDT). Skips overnight to avoid noise.
+    - cron: "0 10,12,14,16,18,20,22 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rain-alert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run rain alert
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_ALERT_MENTION: ${{ secrets.SLACK_ALERT_MENTION }}
+        run: python weather.py rain-alert

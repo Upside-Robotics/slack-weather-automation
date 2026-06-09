@@ -31,10 +31,14 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET", "").strip()
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "").strip()
 SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "").strip()
+SLACK_ALERT_MENTION = os.environ.get("SLACK_ALERT_MENTION", "").strip()
 _SLASH = os.environ.get("SLACK_SLASH_COMMAND", "/fieldweather").strip()
 SLACK_SLASH_COMMAND = _SLASH if _SLASH.startswith("/") else f"/{_SLASH}"
 
 RAIN_ALERT_THRESHOLD = 50
+# Thresholds for the dedicated rain-alert command (stricter to avoid noise)
+RAIN_ALERT_PCT = 70
+RAIN_ALERT_MM = 2.0
 # Hourly windows for “when rain” (slightly looser than daily alert)
 HOURLY_WET_PROB_MIN = 40
 # Wind speed threshold to highlight (km/h)
@@ -972,6 +976,56 @@ def cmd_dry_run(_args):
           f"{sum(1 for r in results if not r['wx'])} failed")
 
 
+def _mention_str() -> str:
+    if not SLACK_ALERT_MENTION:
+        return ""
+    m = SLACK_ALERT_MENTION.lstrip("@")
+    if m in ("here", "channel"):
+        return f"<!{m}> "
+    return f"<@{SLACK_ALERT_MENTION}> "
+
+
+def cmd_rain_alert(_args):
+    print(f"Rain alert check — {datetime.now():%Y-%m-%d %H:%M}\n")
+    results = collect_results(verbose=False)
+    rainy = [
+        r for r in results
+        if r["wx"]
+        and r["wx"]["rain_pct"] is not None
+        and r["wx"]["rain_pct"] >= RAIN_ALERT_PCT
+        and float(r["wx"]["precip_mm"] or 0) >= RAIN_ALERT_MM
+    ]
+    if not rainy:
+        print(f"No fields exceed {RAIN_ALERT_PCT}% / {RAIN_ALERT_MM}mm threshold. No alert sent.")
+        return
+
+    mention = _mention_str()
+    header = f"{mention}:rain_cloud: *Rain Alert* — {len(rainy)} field{'s' if len(rainy) != 1 else ''} with significant rain forecast"
+    lines = []
+    for r in rainy:
+        wx = r["wx"]
+        short = _SHORT.get(r["name"], r["name"])
+        rain_pct = wx["rain_pct"]
+        precip = float(wx["precip_mm"] or 0)
+        rt = wx.get("rain_timing")
+        when_str = ""
+        if isinstance(rt, dict) and rt.get("summary") and rt["summary"] not in (
+            "No meaningful rain in the hourly outlook.",
+            "Light / scattered in the model (no clear hourly peak).",
+        ):
+            when_str = f" · {rt['summary']}"
+        lines.append(f"• *{short}* — {rain_pct}% / {precip:.1f}mm{when_str}")
+
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": header + "\n" + "\n".join(lines)}}]
+
+    if not SLACK_WEBHOOK_URL:
+        print(header)
+        print("\n".join(lines))
+        return
+    _post_json(SLACK_WEBHOOK_URL, {"blocks": blocks})
+    print(f"Rain alert posted — {len(rainy)} fields.")
+
+
 def cmd_server(args):
     if not SLACK_SIGNING_SECRET:
         print("Warning: SLACK_SIGNING_SECRET not set; requests are not verified.")
@@ -993,6 +1047,7 @@ def main():
         func=cmd_post
     )
     sub.add_parser("dry-run", help="Fetch only, no Slack").set_defaults(func=cmd_dry_run)
+    sub.add_parser("rain-alert", help="Post alert if any field has significant rain forecast").set_defaults(func=cmd_rain_alert)
     sp = sub.add_parser("server", help="HTTP server for Slack slash command")
     sp.add_argument("--host", default=os.environ.get("BIND_HOST", "0.0.0.0"))
     sp.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8765")))
