@@ -31,7 +31,7 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET", "").strip()
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "").strip()
 SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "").strip()
-SLACK_ALERT_MENTION = os.environ.get("SLACK_ALERT_MENTION", "").strip()
+SLACK_ALERT_MENTION = os.environ.get("SLACK_ALERT_MENTION", "U0ASGFMA9TQ").strip()  # Alex M
 _SLASH = os.environ.get("SLACK_SLASH_COMMAND", "/fieldweather").strip()
 SLACK_SLASH_COMMAND = _SLASH if _SLASH.startswith("/") else f"/{_SLASH}"
 
