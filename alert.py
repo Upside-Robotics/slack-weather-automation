@@ -12,6 +12,7 @@ History:    last 10 min of raw readings per alerted farm, shown in the alert.
 
 import json
 import os
+import sys
 import urllib.request
 from datetime import datetime, timezone
 
@@ -20,7 +21,7 @@ import psycopg2
 
 load_dotenv()
 
-SLACK_WEBHOOK = "https://hooks.slack.com/services/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"
+SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL")
 
 # base_station_id → {field_id, name}
 BASE_STATION_FIELD_MAP = {
@@ -78,6 +79,7 @@ def db_connect():
         dbname=os.environ["POSTGRES_DATABASE"],
         user=os.environ["POSTGRES_USER"],
         password=os.environ["POSTGRES_PASSWORD"],
+        connect_timeout=int(os.environ.get("POSTGRES_CONNECT_TIMEOUT", "10")),
     )
 
 
@@ -201,6 +203,10 @@ def format_history(rows: list[dict]) -> str:
 
 
 def post_slack(text: str):
+    if not SLACK_WEBHOOK:
+        print("SLACK_WEBHOOK_URL is not set; skipping Slack post", file=sys.stderr)
+        return None
+
     payload = json.dumps({"text": text}).encode("utf-8")
     req = urllib.request.Request(
         SLACK_WEBHOOK,
@@ -213,7 +219,12 @@ def post_slack(text: str):
 
 
 def main():
-    conn = db_connect()
+    try:
+        conn = db_connect()
+    except psycopg2.OperationalError as exc:
+        print(f"Database connection unavailable; skipping alert run: {exc}", file=sys.stderr)
+        return
+
     readings = fetch_readings(conn)
     hourly = fetch_hourly_view(conn)
     ambient = fetch_ambient_temps(conn)
