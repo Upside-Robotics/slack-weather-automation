@@ -2,8 +2,11 @@
 """
 Sensor rain alert — polls modbus_sensor_readings every 10 min (via GitHub Actions cron).
 Sends a Slack alert when a farm transitions from dry to raining.
-Stateless: detects the transition by comparing the latest reading to the
-previous reading within a rolling 30-min window, so no DB writes needed.
+
+Detection:  raw modbus_sensor_readings — compares latest vs previous reading
+            in a 30-min window (stateless, no DB writes, timely).
+Context:    modbus_sensor_readings_1h view — hourly averages and rain total
+            included in the Slack message.
 """
 
 import json
