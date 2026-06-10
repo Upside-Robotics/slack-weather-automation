@@ -74,6 +74,33 @@ def fetch_readings(conn) -> list[dict]:
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+def fetch_hourly_view(conn) -> dict[str, dict]:
+    """
+    Current-hour bucket from modbus_sensor_readings_1h.
+    Provides hourly-averaged soil readings and total rain this hour.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT ON (field_id)
+                field_id,
+                bucket_start,
+                rain_total_mm_hour,
+                soil_sensor_temperature_avg,
+                soil_sensor_humidity_avg
+            FROM modbus_sensor_readings_1h
+            ORDER BY field_id, bucket_start DESC
+        """)
+        return {
+            row[0]: {
+                "bucket_start":          row[1],
+                "rain_total_mm_hour":    row[2],
+                "soil_temp_avg_c":       row[3],
+                "soil_moisture_avg_pct": row[4],
+            }
+            for row in cur.fetchall()
+        }
+
+
 def fetch_ambient_temps(conn) -> dict[str, float]:
     """Most recent ambient temperature per field (last 30 min)."""
     with conn.cursor() as cur:
@@ -103,6 +130,7 @@ def post_slack(text: str):
 def main():
     conn = db_connect()
     readings = fetch_readings(conn)
+    hourly = fetch_hourly_view(conn)
     ambient = fetch_ambient_temps(conn)
     conn.close()
 
@@ -121,13 +149,16 @@ def main():
 
         # Alert only on dry → raining transition
         if current_rain > 0 and prev_rain == 0:
+            fid = row["field_id"]
+            h = hourly.get(fid, {})
             alerts.append({
-                "field_id": row["field_id"],
-                "farm_name": row["farm_name"] or row["field_id"],
-                "rain_mm": current_rain,
-                "soil_temp_c": row.get("soil_temp_c"),
-                "soil_moisture_pct": row.get("soil_moisture_pct"),
-                "ambient_temp_c": ambient.get(row["field_id"]),
+                "field_id":              fid,
+                "farm_name":             row["farm_name"] or fid,
+                "rain_mm":               current_rain,
+                "rain_total_mm_hour":    h.get("rain_total_mm_hour"),
+                "soil_temp_avg_c":       h.get("soil_temp_avg_c"),
+                "soil_moisture_avg_pct": h.get("soil_moisture_avg_pct"),
+                "ambient_temp_c":        ambient.get(fid),
             })
 
     now = datetime.now(timezone.utc)
@@ -137,12 +168,14 @@ def main():
         for a in sorted(alerts, key=lambda x: x["farm_name"]):
             line = f"• *{a['farm_name']}* (`{a['field_id']}`) — Rain Detected"
             details = []
-            if a["soil_temp_c"] is not None:
-                details.append(f"Soil temp: {a['soil_temp_c']:.1f}°C")
-            if a["soil_moisture_pct"] is not None:
-                details.append(f"Soil moisture: {a['soil_moisture_pct']:.1f}%")
+            if a["rain_total_mm_hour"] is not None:
+                details.append(f"This hour: {float(a['rain_total_mm_hour']):.1f} mm")
+            if a["soil_temp_avg_c"] is not None:
+                details.append(f"Soil temp: {float(a['soil_temp_avg_c']):.1f}°C")
+            if a["soil_moisture_avg_pct"] is not None:
+                details.append(f"Soil moisture: {float(a['soil_moisture_avg_pct']):.1f}%")
             if a["ambient_temp_c"] is not None:
-                details.append(f"Ambient: {a['ambient_temp_c']:.1f}°C")
+                details.append(f"Ambient: {float(a['ambient_temp_c']):.1f}°C")
             if details:
                 line += "\n  " + " · ".join(details)
             lines.append(line)
