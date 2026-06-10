@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Sensor rain alert — polls modbus_sensor_readings every 10 min (via GitHub Actions cron).
-Sends a Slack alert the first time rain is detected at a farm.
-State (is_raining per farm) is persisted in the DB so repeat alerts are suppressed
-until the rain stops and starts again.
+Sends a Slack alert when a farm transitions from dry to raining.
+Stateless: detects the transition by comparing the latest reading to the
+previous reading within a rolling 30-min window, so no DB writes needed.
 """
 
 import json
@@ -18,12 +18,6 @@ load_dotenv()
 
 SLACK_WEBHOOK = "https://hooks.slack.com/services/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"
 
-# How long before re-alerting a farm that is still raining (minutes)
-ALERT_COOLDOWN_MINUTES = int(os.environ.get("ALERT_COOLDOWN_MINUTES", "60"))
-
-# Only consider readings from the last N minutes to avoid acting on stale data
-STALE_DATA_MINUTES = int(os.environ.get("STALE_DATA_MINUTES", "30"))
-
 
 def db_connect():
     return psycopg2.connect(
@@ -35,91 +29,60 @@ def db_connect():
     )
 
 
-def ensure_alert_log_table(conn):
-    with conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS rain_alert_log (
-                field_id        TEXT        PRIMARY KEY,
-                farm_name       TEXT        NOT NULL,
-                last_alert_at   TIMESTAMPTZ NOT NULL,
-                is_raining      BOOLEAN     NOT NULL DEFAULT TRUE
-            )
-        """)
-    conn.commit()
-
-
-def fetch_latest_sensor_readings(conn):
+def fetch_readings(conn) -> list[dict]:
     """
-    Most recent modbus row per field (within STALE_DATA_MINUTES), joined to
-    the fields table for the human-readable farm name.
-    Returns list of dicts with: field_id, farm_name, soil_temp_c,
-    soil_moisture_pct, rain_mm_per_query, event_time.
+    Returns one row per active field with:
+      - current_rain: rain_sensor_mm_per_query from the most recent reading
+      - prev_rain: same from the second-most-recent reading in the last 30 min
+    If current_rain > 0 and prev_rain == 0 (or no previous), rain just started.
     """
     query = """
-        SELECT DISTINCT ON (m.field_id)
-            m.field_id,
-            f.name                      AS farm_name,
-            m.soil_sensor_temperature_c AS soil_temp_c,
-            m.soil_sensor_humidity_pct  AS soil_moisture_pct,
-            m.rain_sensor_mm_per_query  AS rain_mm_per_query,
-            m.event_time
-        FROM modbus_sensor_readings m
-        LEFT JOIN fields f ON f.field_id = m.field_id
-        WHERE m.event_time >= NOW() - INTERVAL '%s minutes'
-          AND (f.is_test_field IS NULL OR f.is_test_field = FALSE)
-        ORDER BY m.field_id, m.event_time DESC
+        WITH ranked AS (
+            SELECT
+                m.field_id,
+                f.name                       AS farm_name,
+                m.soil_sensor_temperature_c,
+                m.soil_sensor_humidity_pct,
+                m.rain_sensor_mm_per_query,
+                m.event_time,
+                ROW_NUMBER() OVER (
+                    PARTITION BY m.field_id
+                    ORDER BY m.event_time DESC
+                ) AS rn
+            FROM modbus_sensor_readings m
+            LEFT JOIN fields f ON f.field_id = m.field_id
+            WHERE m.event_time >= NOW() - INTERVAL '30 minutes'
+              AND (f.is_test_field IS NULL OR f.is_test_field = FALSE)
+        )
+        SELECT
+            field_id,
+            farm_name,
+            MAX(CASE WHEN rn = 1 THEN rain_sensor_mm_per_query END)   AS current_rain,
+            MAX(CASE WHEN rn = 2 THEN rain_sensor_mm_per_query END)   AS prev_rain,
+            MAX(CASE WHEN rn = 1 THEN soil_sensor_temperature_c END)  AS soil_temp_c,
+            MAX(CASE WHEN rn = 1 THEN soil_sensor_humidity_pct END)   AS soil_moisture_pct,
+            MAX(CASE WHEN rn = 1 THEN event_time END)                 AS event_time
+        FROM ranked
+        GROUP BY field_id, farm_name
     """
     with conn.cursor() as cur:
-        cur.execute(query, (STALE_DATA_MINUTES,))
+        cur.execute(query)
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def fetch_ambient_temps(conn):
-    """Most recent ambient temperature per field from the weather status table."""
-    query = """
-        SELECT DISTINCT ON (field_id)
-            field_id,
-            temperature AS ambient_temp_c
-        FROM robot_pc_board_weather_status
-        WHERE write_time >= NOW() - INTERVAL '30 minutes'
-        ORDER BY field_id, write_time DESC
-    """
+def fetch_ambient_temps(conn) -> dict[str, float]:
+    """Most recent ambient temperature per field (last 30 min)."""
     with conn.cursor() as cur:
-        cur.execute(query)
+        cur.execute("""
+            SELECT DISTINCT ON (field_id)
+                field_id,
+                temperature
+            FROM robot_pc_board_weather_status
+            WHERE write_time >= NOW() - INTERVAL '30 minutes'
+            ORDER BY field_id, write_time DESC
+        """)
         return {row[0]: row[1] for row in cur.fetchall()}
-
-
-def get_alert_state(conn) -> dict:
-    with conn.cursor() as cur:
-        cur.execute("SELECT field_id, farm_name, last_alert_at, is_raining FROM rain_alert_log")
-        return {
-            row[0]: {"farm_name": row[1], "last_alert_at": row[2], "is_raining": row[3]}
-            for row in cur.fetchall()
-        }
-
-
-def upsert_state(conn, field_id: str, farm_name: str, is_raining: bool, update_timestamp: bool):
-    now = datetime.now(timezone.utc)
-    with conn.cursor() as cur:
-        if update_timestamp:
-            cur.execute("""
-                INSERT INTO rain_alert_log (field_id, farm_name, last_alert_at, is_raining)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (field_id) DO UPDATE
-                SET farm_name     = EXCLUDED.farm_name,
-                    last_alert_at = EXCLUDED.last_alert_at,
-                    is_raining    = EXCLUDED.is_raining
-            """, (field_id, farm_name, now, is_raining))
-        else:
-            cur.execute("""
-                INSERT INTO rain_alert_log (field_id, farm_name, last_alert_at, is_raining)
-                VALUES (%s, %s, NOW(), %s)
-                ON CONFLICT (field_id) DO UPDATE
-                SET farm_name  = EXCLUDED.farm_name,
-                    is_raining = EXCLUDED.is_raining
-            """, (field_id, farm_name, is_raining))
-    conn.commit()
 
 
 def post_slack(text: str):
@@ -136,56 +99,40 @@ def post_slack(text: str):
 
 def main():
     conn = db_connect()
-    ensure_alert_log_table(conn)
-
-    readings = fetch_latest_sensor_readings(conn)
+    readings = fetch_readings(conn)
     ambient = fetch_ambient_temps(conn)
-    prior_state = get_alert_state(conn)
-    now = datetime.now(timezone.utc)
+    conn.close()
 
     alerts: list[dict] = []
 
     for row in readings:
-        field_id = str(row["field_id"])
-        farm_name = row["farm_name"] or field_id
+        try:
+            current_rain = float(row["current_rain"]) if row["current_rain"] is not None else 0.0
+        except (TypeError, ValueError):
+            current_rain = 0.0
 
         try:
-            rain_mm = float(row["rain_mm_per_query"]) if row["rain_mm_per_query"] is not None else 0.0
+            prev_rain = float(row["prev_rain"]) if row["prev_rain"] is not None else 0.0
         except (TypeError, ValueError):
-            rain_mm = 0.0
+            prev_rain = 0.0
 
-        is_raining = rain_mm > 0
-        prior = prior_state.get(field_id, {})
-        was_raining = prior.get("is_raining", False)
-        last_alert = prior.get("last_alert_at")
-
-        should_alert = False
-        if is_raining:
-            if not was_raining:
-                should_alert = True  # rain just started
-            elif last_alert:
-                elapsed_min = (now - last_alert).total_seconds() / 60
-                if elapsed_min >= ALERT_COOLDOWN_MINUTES:
-                    should_alert = True  # still raining, re-alert after cooldown
-
-        if should_alert:
+        # Alert only on dry → raining transition
+        if current_rain > 0 and prev_rain == 0:
             alerts.append({
-                "field_id": field_id,
-                "farm_name": farm_name,
-                "rain_mm": rain_mm,
+                "field_id": row["field_id"],
+                "farm_name": row["farm_name"] or row["field_id"],
+                "rain_mm": current_rain,
                 "soil_temp_c": row.get("soil_temp_c"),
                 "soil_moisture_pct": row.get("soil_moisture_pct"),
-                "ambient_temp_c": ambient.get(field_id),
+                "ambient_temp_c": ambient.get(row["field_id"]),
             })
 
-        upsert_state(conn, field_id, farm_name, is_raining, update_timestamp=should_alert)
-
-    conn.close()
+    now = datetime.now(timezone.utc)
 
     if alerts:
         lines = []
         for a in sorted(alerts, key=lambda x: x["farm_name"]):
-            parts = [f"• *{a['farm_name']}* (`{a['field_id']}`) — Rain Detected"]
+            line = f"• *{a['farm_name']}* (`{a['field_id']}`) — Rain Detected"
             details = []
             if a["soil_temp_c"] is not None:
                 details.append(f"Soil temp: {a['soil_temp_c']:.1f}°C")
@@ -194,8 +141,8 @@ def main():
             if a["ambient_temp_c"] is not None:
                 details.append(f"Ambient: {a['ambient_temp_c']:.1f}°C")
             if details:
-                parts.append("  " + " · ".join(details))
-            lines.append("\n".join(parts))
+                line += "\n  " + " · ".join(details)
+            lines.append(line)
 
         msg = ":rain_cloud: *Rain Detected*\n" + "\n".join(lines)
         post_slack(msg)
