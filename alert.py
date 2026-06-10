@@ -8,11 +8,9 @@ until the rain stops and starts again.
 
 import json
 import os
-import sys
 import urllib.request
 from datetime import datetime, timezone
 
-sys.path.insert(0, "C:/Users/upsid/AppData/Roaming/Python/Python312/site-packages")
 from dotenv import load_dotenv
 import psycopg2
 
