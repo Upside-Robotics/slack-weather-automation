@@ -637,6 +637,7 @@ def fetch_weather(lat, lon):
         "weathercode,windspeed_10m_max,"
         "apparent_temperature_max,uv_index_max"
         "&hourly=precipitation,precipitation_probability"
+        "&current=precipitation,rain,weather_code"
         "&timezone=America%2FToronto"
         "&forecast_days=3"
     )
@@ -668,6 +669,12 @@ def parse_today(data):
         heat_wave = sum(1 for t in highs[:3] if t is not None and float(t) >= 32) >= 2
         apparent_max = (d.get("apparent_temperature_max") or [None])[0]
         uv_max = (d.get("uv_index_max") or [None])[0]
+        curr = data.get("current") or {}
+        current = {
+            "precipitation": curr.get("precipitation"),
+            "rain": curr.get("rain"),
+            "weather_code": curr.get("weather_code"),
+        } if curr else None
         return {
             "date": today,
             "max_temp": highs[0],
@@ -680,6 +687,7 @@ def parse_today(data):
             "apparent_max": apparent_max,
             "uv_max": uv_max,
             "heat_wave": heat_wave,
+            "current": current,
             "tmr_rain": d["precipitation_probability_max"][1]
             if len(d["precipitation_probability_max"]) > 1
             else None,
