@@ -607,18 +607,27 @@ def _uv_label(uv: float) -> str:
 _RAIN_WMO = {51, 53, 55, 61, 63, 65, 80, 81, 82, 95, 96, 99}
 
 
-def _current_rain_str(wx) -> str:
+def _is_currently_raining(wx) -> tuple[bool, float]:
     curr = wx.get("current")
     if not curr:
-        return ""
+        return False, 0.0
     try:
         p = float(curr.get("precipitation") or 0)
     except (TypeError, ValueError):
         p = 0.0
     wmo = curr.get("weather_code")
     is_raining = p > 0 or (wmo is not None and int(wmo) in _RAIN_WMO)
+    return is_raining, p
+
+
+def _current_rain_str(wx) -> str:
+    curr = wx.get("current")
+    if not curr:
+        return ""
+    is_raining, p = _is_currently_raining(wx)
     if is_raining:
-        return f" · 🌧️ *now {p:.1f}mm*"
+        mention = f"<@{SLACK_ALERT_MENTION}> " if SLACK_ALERT_MENTION else ""
+        return f" · 🌧️ *now {p:.1f}mm* {mention}"
     return " · now dry"
 
 
