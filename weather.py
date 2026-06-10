@@ -604,6 +604,24 @@ def _uv_label(uv: float) -> str:
     return "Extreme"
 
 
+_RAIN_WMO = {51, 53, 55, 61, 63, 65, 80, 81, 82, 95, 96, 99}
+
+
+def _current_rain_str(wx) -> str:
+    curr = wx.get("current")
+    if not curr:
+        return ""
+    try:
+        p = float(curr.get("precipitation") or 0)
+    except (TypeError, ValueError):
+        p = 0.0
+    wmo = curr.get("weather_code")
+    is_raining = p > 0 or (wmo is not None and int(wmo) in _RAIN_WMO)
+    if is_raining:
+        return f" · 🌧️ *now {p:.1f}mm*"
+    return " · now dry"
+
+
 def _heat_info_text(wx) -> str:
     try:
         hi = float(wx["max_temp"])
@@ -805,8 +823,9 @@ def build_slack_blocks(results):
                 if peak_mm is not None and peak_mm_time and float(peak_mm) >= 0.1:
                     when_str += f" (peak {_fmt_clock(_parse_hour_ts(peak_mm_time))}, {float(peak_mm):.1f}mm)"
             heat_str = _heat_info_text(wx)
+            now_str = _current_rain_str(wx) if alert else ""
             lines.append(
-                f"{emoji} *{short}* · {condition} · {wx['max_temp']}°/{wx['min_temp']}°C{temp_str}{heat_str} · {rain_str}{when_str}{frost_str}{wind_str}"
+                f"{emoji} *{short}* · {condition} · {wx['max_temp']}°/{wx['min_temp']}°C{temp_str}{heat_str} · {rain_str}{when_str}{now_str}{frost_str}{wind_str}"
             )
 
         chunk: list[str] = []
