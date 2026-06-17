@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 # --- config ---
 
-SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/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").strip()
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/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").strip()
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET", "").strip()
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "").strip()
 SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "").strip()
