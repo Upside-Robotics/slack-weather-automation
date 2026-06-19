@@ -3,7 +3,7 @@ name: 3-Hour Rain Alert
 on:
   schedule:
     # Every 15 minutes, 10:00–23:00 UTC (06:00–19:00 EDT) — daytime only
-    - cron: "0,15,30,45 10-23 * * *"
+    - cron: "0 10-23 * * *"
   workflow_dispatch:
 
 permissions:

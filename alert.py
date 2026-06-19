@@ -103,7 +103,7 @@ def fetch_readings(conn) -> list[dict]:
                 ) AS rn
             FROM modbus_sensor_readings m
             LEFT JOIN fields f ON f.field_id = m.field_id
-            WHERE m.event_time >= NOW() - INTERVAL '30 minutes'
+            WHERE m.event_time >= NOW() - INTERVAL '60 minutes'
               AND (f.is_test_field IS NULL OR f.is_test_field = FALSE)
         )
         SELECT
