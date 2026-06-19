@@ -684,55 +684,68 @@ def fetch_weather(lat, lon):
     return None
 
 
-def parse_today(data):
+def parse_day(data, offset: int = 0):
     if not data or "daily" not in data:
         return None
     d = data["daily"]
     try:
-        today = d["time"][0]
-        precip_mm = d["precipitation_sum"][0]
-        rain_timing = _rain_timing_details(data, today, precip_mm)
+        day = d["time"][offset]
+        precip_mm = d["precipitation_sum"][offset]
+        rain_timing = _rain_timing_details(data, day, precip_mm)
         highs = d["temperature_2m_max"]
         heat_wave = sum(1 for t in highs[:3] if t is not None and float(t) >= 32) >= 2
-        apparent_max = (d.get("apparent_temperature_max") or [None])[0]
-        uv_max = (d.get("uv_index_max") or [None])[0]
+        apparent_max = (d.get("apparent_temperature_max") or [None])[offset]
+        uv_max = (d.get("uv_index_max") or [None])[offset]
         curr = data.get("current") or {}
         current = {
             "precipitation": curr.get("precipitation"),
             "rain": curr.get("rain"),
             "weather_code": curr.get("weather_code"),
-        } if curr else None
+        } if curr and offset == 0 else None
+        next_offset = offset + 1
         return {
-            "date": today,
-            "max_temp": highs[0],
-            "min_temp": d["temperature_2m_min"][0],
+            "date": day,
+            "max_temp": highs[offset],
+            "min_temp": d["temperature_2m_min"][offset],
             "precip_mm": precip_mm,
-            "rain_pct": d["precipitation_probability_max"][0],
-            "wmo": d["weathercode"][0],
-            "wind_kmh": d["windspeed_10m_max"][0],
+            "rain_pct": d["precipitation_probability_max"][offset],
+            "wmo": d["weathercode"][offset],
+            "wind_kmh": d["windspeed_10m_max"][offset],
             "rain_timing": rain_timing,
             "apparent_max": apparent_max,
             "uv_max": uv_max,
             "heat_wave": heat_wave,
             "current": current,
-            "tmr_rain": d["precipitation_probability_max"][1]
-            if len(d["precipitation_probability_max"]) > 1
+            "tmr_rain": d["precipitation_probability_max"][next_offset]
+            if len(d["precipitation_probability_max"]) > next_offset
             else None,
-            "tmr_precip": d["precipitation_sum"][1] if len(d["precipitation_sum"]) > 1 else None,
-            "tmr_wmo": d["weathercode"][1] if len(d["weathercode"]) > 1 else None,
+            "tmr_precip": d["precipitation_sum"][next_offset] if len(d["precipitation_sum"]) > next_offset else None,
+            "tmr_wmo": d["weathercode"][next_offset] if len(d["weathercode"]) > next_offset else None,
         }
     except (IndexError, KeyError):
         return None
 
 
-def collect_results(verbose=True):
+def parse_today(data):
+    return parse_day(data, offset=0)
+
+
+def _forecast_offset() -> int:
+    """Return 1 (tomorrow) for the evening run (UTC hour >= 18), else 0 (today)."""
+    from datetime import timezone
+    return 1 if datetime.now(timezone.utc).hour >= 18 else 0
+
+
+def collect_results(verbose=True, offset: int | None = None):
+    if offset is None:
+        offset = _forecast_offset()
     results = []
     for i, field in enumerate(FIELDS, 1):
         near = forecast_reference_place(field["lat"], field["lon"])
         if verbose:
             print(f"  [{i:02d}/{len(FIELDS)}] {field['name']} ({near})...", end=" ", flush=True)
         data = fetch_weather(field["lat"], field["lon"])
-        wx = parse_today(data)
+        wx = parse_day(data, offset)
         if verbose:
             if wx:
                 rt = wx.get("rain_timing")
@@ -771,8 +784,9 @@ def build_slack_blocks(results):
     )
     total_failed = sum(1 for r in results if not r["wx"])
 
+    forecast_label = "Tomorrow's Forecast" if _forecast_offset() == 1 else "Today's Forecast"
     blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": "Upside Fields — Daily Weather"}},
+        {"type": "header", "text": {"type": "plain_text", "text": f"Upside Fields — {forecast_label}"}},
         {
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": (

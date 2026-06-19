@@ -1,0 +1,25 @@
+name: 3-Hour Rain Alert
+
+on:
+  schedule:
+    # Every 15 minutes, 10:00–23:00 UTC (06:00–19:00 EDT) — daytime only
+    - cron: "0,15,30,45 10-23 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rain-alert-3h:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run 3-hour rain alert
+        env:
+          RAIN_ALERT_WEBHOOK_URL: ${{ secrets.RAIN_ALERT_WEBHOOK_URL }}
+        run: python rain_alert_3h.py
