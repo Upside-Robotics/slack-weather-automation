@@ -29,4 +29,5 @@ jobs:
           POSTGRES_USER:     ${{ secrets.POSTGRES_USER }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RAIN_ALERT_WEBHOOK_URL: ${{ secrets.RAIN_ALERT_WEBHOOK_URL }}
         run: python alert.py

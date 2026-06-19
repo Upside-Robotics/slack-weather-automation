@@ -21,7 +21,7 @@ import psycopg2
 
 load_dotenv()
 
-SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL")
+SLACK_WEBHOOK = os.environ.get("RAIN_ALERT_WEBHOOK_URL") or os.environ.get("SLACK_WEBHOOK_URL")
 
 # base_station_id → {field_id, name}
 BASE_STATION_FIELD_MAP = {
