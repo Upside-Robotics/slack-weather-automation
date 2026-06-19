@@ -16,10 +16,7 @@ from datetime import datetime, timezone, timedelta
 from urllib.parse import urlencode
 
 # Rain-alert channel webhook
-RAIN_ALERT_WEBHOOK = os.environ.get(
-    "RAIN_ALERT_WEBHOOK_URL",
-    "https://hooks.slack.com/services/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",
-).strip()
+RAIN_ALERT_WEBHOOK = os.environ.get("RAIN_ALERT_WEBHOOK_URL", "").strip()
 
 # Thresholds
 RAIN_PROB_MIN = 50        # % probability to consider an hour "wet"
@@ -286,6 +283,9 @@ def build_alert_blocks(alerts: list[dict], now_local: datetime) -> list[dict]:
 
 
 def post_to_slack(blocks: list[dict]) -> None:
+    if not RAIN_ALERT_WEBHOOK:
+        print("RAIN_ALERT_WEBHOOK_URL not set; skipping Slack post.")
+        return
     payload = json.dumps({"blocks": blocks}).encode("utf-8")
     req = urllib.request.Request(
         RAIN_ALERT_WEBHOOK,
@@ -347,7 +347,14 @@ def main() -> None:
             print("clear")
 
     if not alerts:
-        print(f"\nNo fields with rain in {MIN_HOURS_AHEAD}–{MAX_HOURS_AHEAD}h window. No alert sent.")
+        print(f"\nNo fields with rain in {MIN_HOURS_AHEAD}–{MAX_HOURS_AHEAD}h window.")
+        now_str = _fmt_clock(now_local)
+        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": (
+            f":white_check_mark: *No fields with rain in the 2–4 hour window*\n"
+            f"_Checked at {now_str} ET_"
+        )}}]
+        post_to_slack(blocks)
+        print("Posted clear status to Slack.")
         return
 
     print(f"\n{len(alerts)} field(s) alerting — posting to Slack...")
