@@ -14,12 +14,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
       - name: Install dependencies
-        run: pip install psycopg2-binary python-dotenv
+        run: pip3 install psycopg2-binary python-dotenv
 
       - name: Run sensor rain alert
         env:
@@ -30,4 +26,4 @@ jobs:
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           RAIN_ALERT_WEBHOOK_URL: ${{ secrets.RAIN_ALERT_WEBHOOK_URL }}
-        run: python alert.py
+        run: python3 alert.py
