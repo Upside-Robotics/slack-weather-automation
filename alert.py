@@ -236,11 +236,6 @@ def main():
             current_rain = float(row["current_rain"]) if row["current_rain"] is not None else 0.0
         except (TypeError, ValueError):
             current_rain = 0.0
-        try:
-            prev_rain = float(row["prev_rain"]) if row["prev_rain"] is not None else 0.0
-        except (TypeError, ValueError):
-            prev_rain = 0.0
-
         if current_rain > 0:
             fid = row["field_id"]
             h = hourly.get(fid, {})
