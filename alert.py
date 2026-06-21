@@ -241,7 +241,7 @@ def main():
         except (TypeError, ValueError):
             prev_rain = 0.0
 
-        if current_rain > 0 and prev_rain == 0:
+        if current_rain > 0:
             fid = row["field_id"]
             h = hourly.get(fid, {})
             meta = FIELD_MAP.get(fid, {})
