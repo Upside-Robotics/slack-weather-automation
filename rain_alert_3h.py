@@ -36,7 +36,7 @@ HEAVY_MM_THRESHOLD = 5.0  # mm in rain window → "heavy rain"
 
 # Alert window: first wet hour must be at least MIN_HOURS_AHEAD and at most MAX_HOURS_AHEAD
 # This prevents re-alerting every 15 min for the same event.
-MIN_HOURS_AHEAD = 2.0
+MIN_HOURS_AHEAD = 0.0
 MAX_HOURS_AHEAD = 4.0
 
 FIELDS = [
@@ -264,7 +264,7 @@ def build_alert_blocks(alerts: list[dict], now_local: datetime) -> list[dict]:
     now_str = _fmt_clock(now_local)
 
     header_text = (
-        f":rain_cloud: *3-Hour Rain Alert* — {total_fields} field{'s' if total_fields != 1 else ''} "
+        f":rain_cloud: *Rain Alert (next 4 hours)* — {total_fields} field{'s' if total_fields != 1 else ''} "
         f"with rain incoming"
         + (f" · :warning: *{heavy_count} heavy (>5mm)*" if heavy_count else "")
         + f"\n_Checked at {now_str} ET_"
