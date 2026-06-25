@@ -361,8 +361,8 @@ def main() -> None:
         print(f"\nNo fields with rain in {MIN_HOURS_AHEAD}–{MAX_HOURS_AHEAD}h window.")
         now_str = _fmt_clock(now_local)
         blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": (
-            f":white_check_mark: *No fields with rain in the 2–4 hour window*\n"
-            f"_Checked at {now_str} ET_"
+            f":white_check_mark: *No fields with rain in the next 4 hours*\n"
+            f"_Checked at {now_str} ET · window: now → +4h_"
         )}}]
         post_to_slack(blocks)
         print("Posted clear status to Slack.")
